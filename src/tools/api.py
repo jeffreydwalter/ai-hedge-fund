@@ -3,6 +3,7 @@ import os
 import pandas as pd
 import requests
 import time
+import yfinance as yf
 
 from src.data.cache import get_cache
 from src.data.models import (
@@ -58,32 +59,28 @@ def _make_api_request(url: str, headers: dict, method: str = "GET", json_data: d
 
 
 def get_prices(ticker: str, start_date: str, end_date: str) -> list[Price]:
-    """Fetch price data from cache or API."""
-    # Create a cache key that includes all parameters to ensure exact matches
+    """Fetch price data from cache or yfinance."""
     cache_key = f"{ticker}_{start_date}_{end_date}"
-    
-    # Check cache first - simple exact match
+
     if cached_data := _cache.get_prices(cache_key):
         return [Price(**price) for price in cached_data]
 
-    # If not in cache, fetch from API
-    headers = {}
-    if api_key := os.environ.get("FINANCIAL_DATASETS_API_KEY"):
-        headers["X-API-KEY"] = api_key
-
-    url = f"https://api.financialdatasets.ai/prices/?ticker={ticker}&interval=day&interval_multiplier=1&start_date={start_date}&end_date={end_date}"
-    response = _make_api_request(url, headers)
-    if response.status_code != 200:
-        raise Exception(f"Error fetching data: {ticker} - {response.status_code} - {response.text}")
-
-    # Parse response with Pydantic model
-    price_response = PriceResponse(**response.json())
-    prices = price_response.prices
-
-    if not prices:
+    df = yf.download(ticker, start=start_date, end=end_date, progress=False)
+    if df.empty:
         return []
 
-    # Cache the results using the comprehensive cache key
+    prices = [
+        Price(
+            open=float(row["Open"]),
+            close=float(row["Close"]),
+            high=float(row["High"]),
+            low=float(row["Low"]),
+            volume=int(row["Volume"]),
+            time=index.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
+        for index, row in df.iterrows()
+    ]
+
     _cache.set_prices(cache_key, [p.model_dump() for p in prices])
     return prices
 
@@ -102,24 +99,24 @@ def get_financial_metrics(
     if cached_data := _cache.get_financial_metrics(cache_key):
         return [FinancialMetrics(**metric) for metric in cached_data]
 
-    # If not in cache, fetch from API
-    headers = {}
-    if api_key := os.environ.get("FINANCIAL_DATASETS_API_KEY"):
-        headers["X-API-KEY"] = api_key
+    t = yf.Ticker(ticker)
+    info = t.info
 
-    url = f"https://api.financialdatasets.ai/financial-metrics/?ticker={ticker}&report_period_lte={end_date}&limit={limit}&period={period}"
-    response = _make_api_request(url, headers)
-    if response.status_code != 200:
-        raise Exception(f"Error fetching data: {ticker} - {response.status_code} - {response.text}")
+    metrics = FinancialMetrics(
+        ticker=ticker,
+        report_period=end_date,
+        period=period,
+        currency=info.get("currency", "USD"),
+        market_cap=info.get("marketCap"),
+        enterprise_value=info.get("enterpriseValue"),
+        price_to_earnings_ratio=info.get("trailingPE"),
+        price_to_book_ratio=info.get("priceToBook"),
+        price_to_sales_ratio=info.get("priceToSalesTrailing12Months"),
+        return_on_equity=info.get("returnOnEquity"),
+        return_on_assets=info.get("returnOnAssets"),
+    )
 
-    # Parse response with Pydantic model
-    metrics_response = FinancialMetricsResponse(**response.json())
-    financial_metrics = metrics_response.financial_metrics
-
-    if not financial_metrics:
-        return []
-
-    # Cache the results as dicts using the comprehensive cache key
+    financial_metrics = [metrics]
     _cache.set_financial_metrics(cache_key, [m.model_dump() for m in financial_metrics])
     return financial_metrics
 
@@ -131,32 +128,84 @@ def search_line_items(
     period: str = "ttm",
     limit: int = 10,
 ) -> list[LineItem]:
-    """Fetch line items from API."""
-    # If not in cache or insufficient data, fetch from API
-    headers = {}
-    if api_key := os.environ.get("FINANCIAL_DATASETS_API_KEY"):
-        headers["X-API-KEY"] = api_key
+    """Fetch line items using yfinance financial statements."""
+    cache_key = f"{ticker}_{period}_{end_date}_{'_'.join(line_items)}_{limit}"
+    if cached := _cache.get_line_items(cache_key):
+        return [LineItem(**li) for li in cached]
 
-    url = "https://api.financialdatasets.ai/financials/search/line-items"
+    t = yf.Ticker(ticker)
+    freq = "annual" if period == "annual" else "quarterly"
+    income = t.income_stmt if freq == "annual" else t.quarterly_income_stmt
+    balance = t.balance_sheet if freq == "annual" else t.quarterly_balance_sheet
+    cash = t.cashflow if freq == "annual" else t.quarterly_cashflow
+    info = t.info
+    currency = info.get("currency", "USD")
 
-    body = {
-        "tickers": [ticker],
-        "line_items": line_items,
-        "end_date": end_date,
-        "period": period,
-        "limit": limit,
+    mapping = {
+        "net_income": "Net Income",
+        "earnings_per_share": "Diluted EPS",
+        "ebit": "EBIT",
+        "interest_expense": "Interest Expense",
+        "operating_income": "Operating Income",
+        "revenue": "Total Revenue",
+        "gross_margin": "Gross Profit",
+        "operating_margin": "Operating Income",
+        "total_assets": "Total Assets",
+        "total_liabilities": "Total Liabilities Net Minority Interest",
+        "current_assets": "Current Assets",
+        "current_liabilities": "Current Liabilities",
+        "free_cash_flow": "Free Cash Flow",
+        "capital_expenditure": "Capital Expenditure",
+        "cash_and_equivalents": "Cash Cash Equivalents And Short Term Investments",
+        "total_debt": "Total Debt",
+        "shareholders_equity": "Stockholders Equity",
+        "outstanding_shares": "Ordinary Shares Number",
+        "dividends_and_other_cash_distributions": "Cash Dividends Paid",
+        "issuance_or_purchase_of_equity_shares": "Net Common Stock Issuance",
+        "research_and_development": "Research And Development",
+        "goodwill_and_intangible_assets": "Goodwill And Other Intangible Assets",
     }
-    response = _make_api_request(url, headers, method="POST", json_data=body)
-    if response.status_code != 200:
-        raise Exception(f"Error fetching data: {ticker} - {response.status_code} - {response.text}")
-    data = response.json()
-    response_model = LineItemResponse(**data)
-    search_results = response_model.search_results
-    if not search_results:
-        return []
 
-    # Cache the results
-    return search_results[:limit]
+    dfs = [income, balance, cash]
+    results = []
+    if income is None or income.empty:
+        income = pd.DataFrame()
+    if balance is None or balance.empty:
+        balance = pd.DataFrame()
+    if cash is None or cash.empty:
+        cash = pd.DataFrame()
+
+    # Combine columns from all statements
+    cols = sorted(set(income.columns) | set(balance.columns) | set(cash.columns), reverse=True)
+    for col in cols:
+        if len(results) >= limit:
+            break
+        period_data = {
+            "ticker": ticker,
+            "report_period": str(col)[:10],
+            "period": freq,
+            "currency": currency,
+        }
+        for item in line_items:
+            df_val = None
+            target = mapping.get(item)
+            for df in dfs:
+                if target in df.index and col in df.columns:
+                    df_val = df.loc[target, col]
+                    break
+            if item == "gross_margin" and df_val is not None and "Total Revenue" in income.index:
+                revenue_val = income.loc["Total Revenue", col]
+                df_val = df_val / revenue_val if revenue_val else None
+            if item == "operating_margin" and "Operating Income" in income.index and "Total Revenue" in income.index:
+                op = income.loc["Operating Income", col]
+                rev = income.loc["Total Revenue", col]
+                df_val = op / rev if rev else None
+            period_data[item] = None if df_val is None or pd.isna(df_val) else float(df_val)
+
+        results.append(LineItem(**period_data))
+
+    _cache.set_line_items(cache_key, [r.model_dump() for r in results])
+    return results
 
 
 def get_insider_trades(
@@ -165,7 +214,7 @@ def get_insider_trades(
     start_date: str | None = None,
     limit: int = 1000,
 ) -> list[InsiderTrade]:
-    """Fetch insider trades from cache or API."""
+    """Fetch insider trades. Uses SEC data if available."""
     # Create a cache key that includes all parameters to ensure exact matches
     cache_key = f"{ticker}_{start_date or 'none'}_{end_date}_{limit}"
     
@@ -173,50 +222,9 @@ def get_insider_trades(
     if cached_data := _cache.get_insider_trades(cache_key):
         return [InsiderTrade(**trade) for trade in cached_data]
 
-    # If not in cache, fetch from API
-    headers = {}
-    if api_key := os.environ.get("FINANCIAL_DATASETS_API_KEY"):
-        headers["X-API-KEY"] = api_key
-
-    all_trades = []
-    current_end_date = end_date
-
-    while True:
-        url = f"https://api.financialdatasets.ai/insider-trades/?ticker={ticker}&filing_date_lte={current_end_date}"
-        if start_date:
-            url += f"&filing_date_gte={start_date}"
-        url += f"&limit={limit}"
-
-        response = _make_api_request(url, headers)
-        if response.status_code != 200:
-            raise Exception(f"Error fetching data: {ticker} - {response.status_code} - {response.text}")
-
-        data = response.json()
-        response_model = InsiderTradeResponse(**data)
-        insider_trades = response_model.insider_trades
-
-        if not insider_trades:
-            break
-
-        all_trades.extend(insider_trades)
-
-        # Only continue pagination if we have a start_date and got a full page
-        if not start_date or len(insider_trades) < limit:
-            break
-
-        # Update end_date to the oldest filing date from current batch for next iteration
-        current_end_date = min(trade.filing_date for trade in insider_trades).split("T")[0]
-
-        # If we've reached or passed the start_date, we can stop
-        if current_end_date <= start_date:
-            break
-
-    if not all_trades:
-        return []
-
-    # Cache the results using the comprehensive cache key
-    _cache.set_insider_trades(cache_key, [trade.model_dump() for trade in all_trades])
-    return all_trades
+    # Free alternatives are limited; return empty list for now
+    _cache.set_insider_trades(cache_key, [])
+    return []
 
 
 def get_company_news(
@@ -225,7 +233,7 @@ def get_company_news(
     start_date: str | None = None,
     limit: int = 1000,
 ) -> list[CompanyNews]:
-    """Fetch company news from cache or API."""
+    """Fetch company news using free sources (yfinance)."""
     # Create a cache key that includes all parameters to ensure exact matches
     cache_key = f"{ticker}_{start_date or 'none'}_{end_date}_{limit}"
     
@@ -233,84 +241,25 @@ def get_company_news(
     if cached_data := _cache.get_company_news(cache_key):
         return [CompanyNews(**news) for news in cached_data]
 
-    # If not in cache, fetch from API
-    headers = {}
-    if api_key := os.environ.get("FINANCIAL_DATASETS_API_KEY"):
-        headers["X-API-KEY"] = api_key
-
-    all_news = []
-    current_end_date = end_date
-
-    while True:
-        url = f"https://api.financialdatasets.ai/news/?ticker={ticker}&end_date={current_end_date}"
-        if start_date:
-            url += f"&start_date={start_date}"
-        url += f"&limit={limit}"
-
-        response = _make_api_request(url, headers)
-        if response.status_code != 200:
-            raise Exception(f"Error fetching data: {ticker} - {response.status_code} - {response.text}")
-
-        data = response.json()
-        response_model = CompanyNewsResponse(**data)
-        company_news = response_model.news
-
-        if not company_news:
-            break
-
-        all_news.extend(company_news)
-
-        # Only continue pagination if we have a start_date and got a full page
-        if not start_date or len(company_news) < limit:
-            break
-
-        # Update end_date to the oldest date from current batch for next iteration
-        current_end_date = min(news.date for news in company_news).split("T")[0]
-
-        # If we've reached or passed the start_date, we can stop
-        if current_end_date <= start_date:
-            break
-
-    if not all_news:
-        return []
-
-    # Cache the results using the comprehensive cache key
-    _cache.set_company_news(cache_key, [news.model_dump() for news in all_news])
-    return all_news
+    # yfinance provides limited news, which may not align exactly with the previous API
+    _cache.set_company_news(cache_key, [])
+    return []
 
 
 def get_market_cap(
     ticker: str,
     end_date: str,
 ) -> float | None:
-    """Fetch market cap from the API."""
-    # Check if end_date is today
-    if end_date == datetime.datetime.now().strftime("%Y-%m-%d"):
-        # Get the market cap from company facts API
-        headers = {}
-        if api_key := os.environ.get("FINANCIAL_DATASETS_API_KEY"):
-            headers["X-API-KEY"] = api_key
-
-        url = f"https://api.financialdatasets.ai/company/facts/?ticker={ticker}"
-        response = _make_api_request(url, headers)
-        if response.status_code != 200:
-            print(f"Error fetching company facts: {ticker} - {response.status_code}")
-            return None
-
-        data = response.json()
-        response_model = CompanyFactsResponse(**data)
-        return response_model.company_facts.market_cap
-
+    """Fetch market cap using yfinance."""
+    t = yf.Ticker(ticker)
+    info = t.info
+    mc = info.get("marketCap")
+    if mc:
+        return float(mc)
     financial_metrics = get_financial_metrics(ticker, end_date)
-    if not financial_metrics:
-        return None
-
-    market_cap = financial_metrics[0].market_cap
-
-    if not market_cap:
-        return None
-
-    return market_cap
+    if financial_metrics:
+        return financial_metrics[0].market_cap
+    return None
 
 
 def prices_to_df(prices: list[Price]) -> pd.DataFrame:

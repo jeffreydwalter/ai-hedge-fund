@@ -44,8 +44,6 @@ OPENAI_API_KEY=your-openai-api-key
 # For running LLMs hosted by groq (deepseek, llama3, etc.)
 GROQ_API_KEY=your-groq-api-key
 
-# For getting financial data to power the hedge fund
-FINANCIAL_DATASETS_API_KEY=your-financial-datasets-api-key
 ```
 
 ## Running the Server

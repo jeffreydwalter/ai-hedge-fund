@@ -81,13 +81,11 @@ OPENAI_API_KEY=your-openai-api-key
 # For running LLMs hosted by groq (deepseek, llama3, etc.)
 GROQ_API_KEY=your-groq-api-key
 
-# For getting financial data to power the hedge fund
-FINANCIAL_DATASETS_API_KEY=your-financial-datasets-api-key
 ```
 
 **Important**: You must set at least one LLM API key (`OPENAI_API_KEY`, `GROQ_API_KEY`, `ANTHROPIC_API_KEY`, or `DEEPSEEK_API_KEY`) for the hedge fund to work. 
 
-**Financial Data**: Data for AAPL, GOOGL, MSFT, NVDA, and TSLA is free and does not require an API key. For any other ticker, you will need to set the `FINANCIAL_DATASETS_API_KEY` in the .env file.
+**Financial Data**: Pricing and basic fundamentals are now fetched from free sources like Yahoo Finance, so no financial data API key is required.
 
 ## How to Run
 
